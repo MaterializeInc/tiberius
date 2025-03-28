@@ -423,3 +423,37 @@ impl IntoIterator for Row {
         self.data.into_iter()
     }
 }
+
+/// An extension trait for [`Row`] that provides test helpers.
+pub trait RowTestExt {
+    /// Create a new [`Row`] from the provided set of [`Column`]s and [`ColumnData`].
+    ///
+    /// Note: The [`Column`] and [`ColumnData`] pair are not checked, it's up to the caller to make
+    /// sure the pairing is valid.
+    fn build(columns: impl IntoIterator<Item = (Column, ColumnData<'static>)>) -> Self;
+
+    /// Sets the result index for this [`Row`].
+    fn with_result_index(&mut self, index: usize);
+}
+
+impl RowTestExt for Row {
+    fn build(values: impl IntoIterator<Item = (Column, ColumnData<'static>)>) -> Self {
+        let mut columns = Vec::default();
+        let mut token_row = TokenRow::new();
+
+        for (column, data) in values.into_iter() {
+            columns.push(column);
+            token_row.push(data);
+        }
+
+        Row {
+            columns: Arc::new(columns),
+            data: token_row,
+            result_index: 0,
+        }
+    }
+
+    fn with_result_index(&mut self, index: usize) {
+        self.result_index = index;
+    }
+}
