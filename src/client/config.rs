@@ -38,6 +38,8 @@ pub struct Config {
 pub(crate) enum TrustConfig {
     #[allow(dead_code)]
     CaCertificateLocation(PathBuf),
+    #[allow(dead_code)]
+    CaCertificatePem(String),
     TrustAll,
     Default,
 }
@@ -130,14 +132,19 @@ impl Config {
     /// storage (or use `trust_cert_ca` instead), using this setting is potentially dangerous.
     ///
     /// # Panics
-    /// Will panic in case `trust_cert_ca` was called before.
+    /// Will panic in case `trust_cert_ca` or `trust_cert_ca_pem` was called before.
     ///
     /// - Defaults to `default`, meaning server certificate is validated against system-truststore.
     pub fn trust_cert(&mut self) {
-        if let TrustConfig::CaCertificateLocation(_) = &self.trust {
-            panic!("'trust_cert' and 'trust_cert_ca' are mutual exclusive! Only use one.")
-        }
-        self.trust = TrustConfig::TrustAll;
+        self.trust = match &self.trust {
+            TrustConfig::Default | TrustConfig::TrustAll => TrustConfig::TrustAll,
+            TrustConfig::CaCertificatePem(_) => {
+                panic!("'trust_cert_ca_pem' and 'trust_cert' are mutual exclusive! Only use one.")
+            }
+            TrustConfig::CaCertificateLocation(_) => {
+                panic!("'trust_cert_ca' and 'trust_cert' are mutual exclusive! Only use one.")
+            }
+        };
     }
 
     /// If set, the server certificate will be validated against the given CA certificate in
@@ -146,15 +153,44 @@ impl Config {
     /// trust-chain.
     ///
     /// # Panics
-    /// Will panic in case `trust_cert` was called before.
+    /// Will panic in case `trust_cert` or `trust_cert_ca_pem` was called before.
     ///
     /// - Defaults to validating the server certificate is validated against system's certificate storage.
     pub fn trust_cert_ca(&mut self, path: impl ToString) {
-        if let TrustConfig::TrustAll = &self.trust {
-            panic!("'trust_cert' and 'trust_cert_ca' are mutual exclusive! Only use one.")
-        } else {
-            self.trust = TrustConfig::CaCertificateLocation(PathBuf::from(path.to_string()))
-        }
+        self.trust = match &self.trust {
+            TrustConfig::Default | TrustConfig::CaCertificateLocation(_) => {
+                TrustConfig::CaCertificateLocation(PathBuf::from(path.to_string()))
+            }
+            TrustConfig::CaCertificatePem(_) => {
+                panic!("'trust_cert_ca_pem' and 'trust_cert_ca' are mutual exclusive! Only use one.")
+            }
+            TrustConfig::TrustAll => {
+                panic!("'trust_cert' and 'trust_cert_ca' are mutual exclusive! Only use one.")
+            }
+        };
+    }
+
+    /// If set, the server certificate will be validated against the given CA certificate in
+    /// in addition to the system-truststore.
+    /// Useful when using self-signed certificates on the server without having to disable the
+    /// trust-chain.
+    ///
+    /// # Panics
+    /// Will panic in case `trust_cert` or `trust_cert_ca` was called before.
+    ///
+    /// - Defaults to validating the server certificate is validated against system's certificate storage.
+    pub fn trust_cert_ca_pem(&mut self, cert: impl ToString) {
+        self.trust = match &self.trust {
+            TrustConfig::Default | TrustConfig::CaCertificatePem(_) => {
+                TrustConfig::CaCertificatePem(cert.to_string())
+            }
+            TrustConfig::CaCertificateLocation(_) => {
+                panic!("'trust_cert_ca' and 'trust_cert_ca_pem' are mutual exclusive! Only use one.")
+            }
+            TrustConfig::TrustAll => {
+                panic!("'trust_cert' and 'trust_cert_ca_pem' are mutual exclusive! Only use one.")
+            }
+        };
     }
 
     /// Sets the authentication method.
