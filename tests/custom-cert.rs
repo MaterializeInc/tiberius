@@ -1,5 +1,5 @@
-#![cfg(unix)]
-use std::sync::Once;
+#[allow(unused_imports)]
+use std::{fs::File, io::Read, sync::Once};
 use tiberius::{AuthMethod, Client, Config, EncryptionLevel, Result};
 use tokio::{net::TcpStream, runtime::Runtime};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
@@ -99,6 +99,46 @@ fn connect_to_custom_cert_instance_without_ca() -> Result<()> {
         let client = Client::connect(config, tcp.compat_write()).await;
 
         assert!(client.is_err());
+        Ok(())
+    })
+}
+
+#[test]
+#[cfg(any(
+    feature = "rustls",
+    feature = "native-tls",
+    feature = "vendored-openssl"
+))]
+fn connect_to_customer_cert_instance_with_pem() -> Result<()> {
+    LOGGER_SETUP.call_once(|| {
+        env_logger::init();
+    });
+    let mut cert_file = File::open("docker/certs/customCA.crt")?;
+    let mut cert = String::new();
+    cert_file.read_to_string(&mut cert)?;
+
+    let rt = Runtime::new()?;
+
+    rt.block_on(async {
+        let mut config = Config::new();
+        config.host("localhost");
+        config.port(1433);
+        config.trust_cert_ca_pem(cert);
+        config.encryption(EncryptionLevel::Required);
+        config.authentication(AuthMethod::sql_server("sa", "<YourStrong@Passw0rd>"));
+
+        let tcp = TcpStream::connect(config.get_addr()).await?;
+
+        let mut client = Client::connect(config, tcp.compat_write()).await?;
+
+        let row = client
+            .query("SELECT @P1", &[&-4i32])
+            .await?
+            .into_row()
+            .await?
+            .unwrap();
+
+        assert_eq!(Some(-4i32), row.get(0));
         Ok(())
     })
 }

@@ -15,6 +15,10 @@ pub(crate) async fn create_tls_stream<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let mut builder = TlsConnector::new();
 
     match &config.trust {
+        TrustConfig::CaCertificatePem(cert) => {
+            let cert = Certificate::from_pem(cert.as_bytes())?;
+            builder = builder.add_root_certificate(cert);
+        }
         TrustConfig::CaCertificateLocation(path) => {
             if let Ok(buf) = fs::read(path) {
                 let cert = match path.extension() {
