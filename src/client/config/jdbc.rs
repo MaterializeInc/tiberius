@@ -333,4 +333,29 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn readonly_parsing() -> crate::Result<()> {
+        let test_str = "jdbc:sqlserver://my-server.com:4200;ApplicationIntent=ReadOnly";
+        let jdbc: JdbcConfig = test_str.parse()?;
+
+        assert!(jdbc.readonly());
+
+        let test_str = "jdbc:sqlserver://my-server.com:4200;ApplicationIntent=ReadWrite";
+        let jdbc: JdbcConfig = test_str.parse()?;
+
+        assert!(!jdbc.readonly());
+
+        Ok(())
+    }
+
+    #[test]
+    fn readonly_parsing_missing() -> crate::Result<()> {
+        let test_str = "jdbc:sqlserver://my-server.com:4200;";
+        let jdbc: JdbcConfig = test_str.parse()?;
+
+        assert!(!jdbc.readonly());
+
+        Ok(())
+    }
 }

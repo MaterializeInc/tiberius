@@ -484,4 +484,29 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn readonly_parsing() -> crate::Result<()> {
+        let test_str = "ApplicationIntent=ReadOnly";
+        let ado: AdoNetConfig = test_str.parse()?;
+
+        assert!(ado.readonly());
+
+        let test_str = "ApplicationIntent=ReadWrite";
+        let ado: AdoNetConfig = test_str.parse()?;
+
+        assert!(!ado.readonly());
+
+        Ok(())
+    }
+
+    #[test]
+    fn readonly_parsing_missing() -> crate::Result<()> {
+        let test_str = "";
+        let ado: AdoNetConfig = test_str.parse()?;
+
+        assert!(!ado.readonly());
+
+        Ok(())
+    }
 }

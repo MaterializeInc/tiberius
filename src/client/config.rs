@@ -162,7 +162,9 @@ impl Config {
                 TrustConfig::CaCertificateLocation(PathBuf::from(path.to_string()))
             }
             TrustConfig::CaCertificatePem(_) => {
-                panic!("'trust_cert_ca_pem' and 'trust_cert_ca' are mutual exclusive! Only use one.")
+                panic!(
+                    "'trust_cert_ca_pem' and 'trust_cert_ca' are mutual exclusive! Only use one."
+                )
             }
             TrustConfig::TrustAll => {
                 panic!("'trust_cert' and 'trust_cert_ca' are mutual exclusive! Only use one.")
@@ -185,7 +187,9 @@ impl Config {
                 TrustConfig::CaCertificatePem(cert.to_string())
             }
             TrustConfig::CaCertificateLocation(_) => {
-                panic!("'trust_cert_ca' and 'trust_cert_ca_pem' are mutual exclusive! Only use one.")
+                panic!(
+                    "'trust_cert_ca' and 'trust_cert_ca_pem' are mutual exclusive! Only use one."
+                )
             }
             TrustConfig::TrustAll => {
                 panic!("'trust_cert' and 'trust_cert_ca_pem' are mutual exclusive! Only use one.")
