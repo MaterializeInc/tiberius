@@ -4,29 +4,24 @@ use crate::{
     Error,
 };
 use futures_util::io::{AsyncRead, AsyncWrite};
+use rustls::{
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::CryptoProvider,
+    pki_types::{CertificateDer, ServerName, UnixTime},
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureScheme,
+};
 use std::{
     fs, io,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::SystemTime,
 };
-use tokio_rustls::{
-    rustls::{
-        client::{
-            HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-            WantsTransparencyPolicyOrClientCert,
-        },
-        Certificate, ClientConfig, ConfigBuilder, DigitallySignedStruct, Error as RustlsError,
-        RootCertStore, ServerName, WantsVerifier,
-    },
-    TlsConnector,
-};
+use tokio_rustls::TlsConnector;
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use tracing::{event, Level};
 
-impl From<tokio_rustls::rustls::Error> for Error {
-    fn from(e: tokio_rustls::rustls::Error) -> Self {
+impl From<RustlsError> for Error {
+    fn from(e: RustlsError) -> Self {
         crate::Error::Tls(e.to_string())
     }
 }
@@ -35,17 +30,26 @@ pub(crate) struct TlsStream<S: AsyncRead + AsyncWrite + Unpin + Send>(
     Compat<tokio_rustls::client::TlsStream<Compat<S>>>,
 );
 
-struct NoCertVerifier;
+/// Returns the process-wide CryptoProvider, or falls back to aws-lc-rs if none
+/// is installed. Callers may install their own provider before opening a
+/// connection; tiberius will respect it.
+fn get_crypto_provider() -> Arc<CryptoProvider> {
+    CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+}
+
+#[derive(Debug)]
+struct NoCertVerifier(Arc<CryptoProvider>);
 
 impl ServerCertVerifier for NoCertVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: SystemTime,
+        _now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
         Ok(ServerCertVerified::assertion())
     }
@@ -53,18 +57,36 @@ impl ServerCertVerifier for NoCertVerifier {
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
-        _cert: &Certificate,
+        _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, RustlsError> {
         Ok(HandshakeSignatureValid::assertion())
     }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
-fn get_server_name(config: &Config) -> crate::Result<ServerName> {
-    match (ServerName::try_from(config.get_host()), &config.trust) {
+fn get_server_name(config: &Config) -> crate::Result<ServerName<'static>> {
+    match (
+        ServerName::try_from(config.get_host().to_owned()),
+        &config.trust,
+    ) {
         (Ok(sn), _) => Ok(sn),
         (Err(_), TrustConfig::TrustAll) => {
-            Ok(ServerName::try_from("placeholder.domain.com").unwrap())
+            Ok(ServerName::try_from("placeholder.domain.com".to_owned()).unwrap())
         }
         (Err(e), _) => Err(crate::Error::Tls(e.to_string())),
     }
@@ -74,7 +96,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TlsStream<S> {
     pub(super) async fn new(config: &Config, stream: S) -> crate::Result<Self> {
         event!(Level::INFO, "Performing a TLS handshake");
 
-        let builder = ClientConfig::builder().with_safe_defaults();
+        let provider = get_crypto_provider();
 
         let client_config = match &config.trust {
             TrustConfig::CaCertificatePem(cert) => {
@@ -97,31 +119,39 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TlsStream<S> {
             TrustConfig::CaCertificateLocation(path) => {
                 if let Ok(buf) = fs::read(path) {
                     let cert = match path.extension() {
-                            Some(ext)
+                        Some(ext)
                             if ext.to_ascii_lowercase() == "pem"
                                 || ext.to_ascii_lowercase() == "crt" =>
-                                {
-                                    let pem_cert = rustls_pemfile::certs(&mut buf.as_slice())?;
-                                    if pem_cert.len() != 1 {
-                                        return Err(crate::Error::Io {
-                                            kind: IoErrorKind::InvalidInput,
-                                            message: format!("Certificate file {} contain 0 or more than 1 certs", path.to_string_lossy()),
-                                        });
-                                    }
-
-                                    Certificate(pem_cert.into_iter().next().unwrap())
-                                }
-                            Some(ext) if ext.to_ascii_lowercase() == "der" => {
-                                Certificate(buf)
+                        {
+                            let mut pem_certs: Vec<CertificateDer<'static>> =
+                                rustls_pemfile::certs(&mut buf.as_slice())
+                                    .collect::<Result<Vec<_>, _>>()?;
+                            if pem_certs.len() != 1 {
+                                return Err(crate::Error::Io {
+                                    kind: IoErrorKind::InvalidInput,
+                                    message: format!(
+                                        "Certificate file {} contain 0 or more than 1 certs",
+                                        path.to_string_lossy()
+                                    ),
+                                });
                             }
-                            Some(_) | None => return Err(crate::Error::Io {
+
+                            pem_certs.remove(0)
+                        }
+                        Some(ext) if ext.to_ascii_lowercase() == "der" => {
+                            CertificateDer::from(buf)
+                        }
+                        Some(_) | None => {
+                            return Err(crate::Error::Io {
                                 kind: IoErrorKind::InvalidInput,
                                 message: "Provided CA certificate with unsupported file-extension! Supported types are pem, crt and der.".to_string(),
-                            }),
-                        };
+                            })
+                        }
+                    };
                     let mut cert_store = RootCertStore::empty();
-                    cert_store.add(&cert)?;
-                    builder
+                    cert_store.add(cert)?;
+                    ClientConfig::builder_with_provider(provider)
+                        .with_safe_default_protocol_versions()?
                         .with_root_certificates(cert_store)
                         .with_no_client_auth()
                 } else {
@@ -136,18 +166,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TlsStream<S> {
                     Level::WARN,
                     "Trusting the server certificate without validation."
                 );
-                let mut config = builder
+                let mut config = ClientConfig::builder_with_provider(provider.clone())
+                    .with_safe_default_protocol_versions()?
                     .with_root_certificates(RootCertStore::empty())
                     .with_no_client_auth();
                 config
                     .dangerous()
-                    .set_certificate_verifier(Arc::new(NoCertVerifier {}));
-                // config.enable_sni = false;
+                    .set_certificate_verifier(Arc::new(NoCertVerifier(provider)));
                 config
             }
             TrustConfig::Default => {
                 event!(Level::INFO, "Using default trust configuration.");
-                builder.with_native_roots().with_no_client_auth()
+                let roots = load_native_roots();
+                ClientConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()?
+                    .with_root_certificates(roots)
+                    .with_no_client_auth()
             }
         };
 
@@ -197,36 +231,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncWrite for TlsStream<S> {
     }
 }
 
-trait ConfigBuilderExt {
-    fn with_native_roots(self) -> ConfigBuilder<ClientConfig, WantsTransparencyPolicyOrClientCert>;
-}
+fn load_native_roots() -> RootCertStore {
+    let mut roots = RootCertStore::empty();
+    let mut valid_count = 0;
+    let mut invalid_count = 0;
 
-impl ConfigBuilderExt for ConfigBuilder<ClientConfig, WantsVerifier> {
-    fn with_native_roots(self) -> ConfigBuilder<ClientConfig, WantsTransparencyPolicyOrClientCert> {
-        let mut roots = RootCertStore::empty();
-        let mut valid_count = 0;
-        let mut invalid_count = 0;
-
-        for cert in rustls_native_certs::load_native_certs().expect("could not load platform certs")
-        {
-            let cert = Certificate(cert.0);
-            match roots.add(&cert) {
-                Ok(_) => valid_count += 1,
-                Err(err) => {
-                    tracing::event!(Level::TRACE, "invalid cert der {:?}", cert.0);
-                    tracing::event!(Level::DEBUG, "certificate parsing failed: {:?}", err);
-                    invalid_count += 1
-                }
+    for cert in rustls_native_certs::load_native_certs().expect("could not load platform certs") {
+        match roots.add(cert) {
+            Ok(_) => valid_count += 1,
+            Err(err) => {
+                tracing::event!(Level::DEBUG, "certificate parsing failed: {:?}", err);
+                invalid_count += 1
             }
         }
-        tracing::event!(
-            Level::TRACE,
-            "with_native_roots processed {} valid and {} invalid certs",
-            valid_count,
-            invalid_count
-        );
-        assert!(!roots.is_empty(), "no CA certificates found");
-
-        self.with_root_certificates(roots)
     }
+    tracing::event!(
+        Level::TRACE,
+        "load_native_roots processed {} valid and {} invalid certs",
+        valid_count,
+        invalid_count
+    );
+    assert!(!roots.is_empty(), "no CA certificates found");
+
+    roots
 }
