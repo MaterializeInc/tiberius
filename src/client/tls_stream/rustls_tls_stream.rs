@@ -100,19 +100,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TlsStream<S> {
 
         let client_config = match &config.trust {
             TrustConfig::CaCertificatePem(cert) => {
-                let pem_cert = rustls_pemfile::certs(&mut cert.as_bytes())?;
-                if pem_cert.len() != 1 {
+                let mut pem_certs: Vec<CertificateDer<'static>> =
+                    rustls_pemfile::certs(&mut cert.as_bytes())
+                        .collect::<Result<Vec<_>, _>>()?;
+                if pem_certs.len() != 1 {
                     return Err(crate::Error::Io {
                         kind: IoErrorKind::InvalidInput,
-                        message: format!("Proided PEM cannot contain more than 1 cert"),
+                        message: format!("Provided PEM cannot contain more than 1 cert"),
                     });
                 }
 
-                let cert = Certificate(pem_cert.into_iter().next().unwrap());
+                let cert = pem_certs.remove(0);
 
                 let mut cert_store = RootCertStore::empty();
-                cert_store.add(&cert)?;
-                builder
+                cert_store.add(cert)?;
+                ClientConfig::builder_with_provider(provider.clone())
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
                     .with_root_certificates(cert_store)
                     .with_no_client_auth()
             }
